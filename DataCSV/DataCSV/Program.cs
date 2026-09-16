@@ -35,7 +35,7 @@ class Program
                    65536))
         {
             // Kopfzeile
-            writer.WriteLine(";Value 1;Value 2;Value 3;Value 4");
+            writer.WriteLine("LineNumber,Value 1,Value 2,Value 3,Value 4");
 
             // 1.000.000 Datensätze erzeugen
             for (int i = 1; i <= numberOfRows; i++)
@@ -45,7 +45,7 @@ class Program
                 // Zufallszahlen von 0 bis einschließlich 2.000.000.000
                 int value2 = rand.Next(0, int.MaxValue);
 
-                writer.WriteLine($"{i};{value};{value};{value2};{value2}");
+                writer.WriteLine($"{i},{value},{value},{value2},{value2}");
             }
         }
 
