@@ -75,6 +75,20 @@
                     <span></span><button @onclick="() => Pan(0, 1)">▼</button><span></span>
                 </div>
             </div>
+            <div class="overview" aria-label="Kartenübersicht">
+                <span class="overview-title">Übersicht</span>
+                <svg class="overview-map" viewBox="-180 -180 360 360" aria-label="Anklicken, um die Hauptkarte zu zentrieren"
+                     @onclick="CenterFromOverview" @onclick:stopPropagation>
+                    <path class="overview-land" d="@World.PathData" />
+                    @foreach (var p in OverviewPoints())
+                    {
+                        <circle class="overview-point @(p.Id == _sel?.Id ? "sel" : _near.Contains(p.Id) ? "near" : "")"
+                                cx="@p.CxS" cy="@p.CyS" r="2" />
+                    }
+                    <rect class="overview-viewport" x="@F(_cx - _w / 2)" y="@F(_cy - _w * Aspect / 2)"
+                          width="@F(_w)" height="@F(_w * Aspect)" />
+                </svg>
+            </div>
         </div>
 
         <aside class="nav">
@@ -118,6 +132,7 @@
 
 @code {
     private const double Aspect = 0.65; // Höhe/Breite der Karte (viewBox 1000 x 650)
+    private const double OverviewSize = 170;
 
     private List<string> _dbs = new();
     private List<string> _cols = new();
@@ -137,6 +152,20 @@
     private double Scale => 1000 / _w;
     private string Transform => $"translate(500 325) scale({F(Scale)}) translate({F(-_cx)} {F(-_cy)})";
     private static string F(double v) => v.ToString("0.##########", CultureInfo.InvariantCulture);
+
+    private IEnumerable<GeoPoint> OverviewPoints()
+    {
+        const int maxPoints = 500;
+        var stride = Math.Max(1, (int)Math.Ceiling(_points.Count / (double)maxPoints));
+        var selectedIncluded = false;
+        for (var i = 0; i < _points.Count; i += stride)
+        {
+            var point = _points[i];
+            selectedIncluded |= point.Id == _sel?.Id;
+            yield return point;
+        }
+        if (_sel != null && !selectedIncluded) yield return _sel;
+    }
 
     // ---------- Laden ----------
 
@@ -265,6 +294,12 @@
     {
         if (e.DeltaY < 0) ZoomIn();
         else if (e.DeltaY > 0) ZoomOut();
+    }
+
+    private void CenterFromOverview(MouseEventArgs e)
+    {
+        _cx = -180 + Math.Clamp(e.OffsetX / OverviewSize, 0, 1) * 360;
+        _cy = -180 + Math.Clamp(e.OffsetY / OverviewSize, 0, 1) * 360;
     }
 
     private void Pan(int dx, int dy)
