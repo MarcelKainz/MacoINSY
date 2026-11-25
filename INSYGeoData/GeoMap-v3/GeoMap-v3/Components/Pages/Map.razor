@@ -1,0 +1,275 @@
+@page "/"
+@using System.Globalization
+@inject GeoService Geo
+@inject WorldService World
+
+<PageTitle>GeoMap Offline</PageTitle>
+
+<div class="layout">
+    <header class="toolbar">
+        <label>DB
+            <select @bind="_db" @bind:after="OnDbChangedAsync">
+                @foreach (var d in _dbs) { <option value="@d">@d</option> }
+            </select>
+        </label>
+        <label>Collection
+            <select @bind="_col" @bind:after="LoadAsync">
+                @foreach (var c in _cols) { <option value="@c">@c</option> }
+            </select>
+        </label>
+        <button @onclick="LoadAsync" disabled="@(_busy || _col == null)">Neu laden</button>
+        <span class="status @(_error ? "error" : "")">@_status</span>
+    </header>
+
+    <div class="main">
+        <div class="mapwrap">
+            <div class="mapbox">
+                @{
+                    var r = F(7 / Scale);        // Punktgröße bleibt auf dem Bildschirm konstant
+                    var rSel = F(10 / Scale);
+                }
+                <svg class="map" viewBox="0 0 1000 650" @onwheel="OnWheel" @onwheel:preventDefault>
+                    <g transform="@Transform">
+                        <WorldLayer D="@World.PathData" />
+
+                        @if (_sel != null)
+                        {
+                            <circle class="radius" cx="@_sel.CxS" cy="@_sel.CyS" r="@F(MapMath.KmToUnits(_radiusKm, _sel.Lat))" />
+                        }
+
+                        @foreach (var p in _points)
+                        {
+                            if (_sel?.Id == p.Id || _near.Contains(p.Id)) continue;
+                            <circle class="pt" cx="@p.CxS" cy="@p.CyS" r="@r" @onclick="() => Select(p)">
+                                <title>@p.Label</title>
+                            </circle>
+                        }
+
+                        @foreach (var p in _points)
+                        {
+                            if (!_near.Contains(p.Id)) continue;
+                            <circle class="pt near" cx="@p.CxS" cy="@p.CyS" r="@r" @onclick="() => Select(p)">
+                                <title>@p.Label (@Km(p) km)</title>
+                            </circle>
+                        }
+
+                        @if (_sel != null)
+                        {
+                            <circle class="pt sel" cx="@_sel.CxS" cy="@_sel.CyS" r="@rSel">
+                                <title>@_sel.Label</title>
+                            </circle>
+                        }
+                    </g>
+                </svg>
+            </div>
+
+            <div class="controls">
+                <div class="zoom">
+                    <button @onclick="ZoomIn" title="Vergrößern">+</button>
+                    <button @onclick="ZoomOut" title="Verkleinern">−</button>
+                    <button @onclick="FitAll" title="Alle Standorte anzeigen">⤢</button>
+                </div>
+                <div class="pad">
+                    <span></span><button @onclick="() => Pan(0, -1)">▲</button><span></span>
+                    <button @onclick="() => Pan(-1, 0)">◀</button><span></span><button @onclick="() => Pan(1, 0)">▶</button>
+                    <span></span><button @onclick="() => Pan(0, 1)">▼</button><span></span>
+                </div>
+            </div>
+        </div>
+
+        <aside class="nav">
+            <div class="nav-head">
+                <h2>Standorte <small>@_points.Count</small></h2>
+                <label>Umkreis
+                    <input type="number" min="0.1" step="any" @bind="_radiusKm" @bind:after="OnRadiusChanged" /> km
+                </label>
+            </div>
+
+            <div class="sel-info">
+                @if (_sel == null)
+                {
+                    <span class="muted">Standort anklicken, um den Umkreis zu markieren.</span>
+                }
+                else
+                {
+                    <b>@_sel.Label</b>
+                    <span>@_sel.Lat.ToString("0.00000"), @_sel.Lon.ToString("0.00000")</span>
+                    <span>@_near.Count weitere im Umkreis von @_radiusKm.ToString("0.##") km</span>
+                    <button @onclick="ClearSelection">Auswahl aufheben</button>
+                }
+            </div>
+
+            <div class="thead">
+                <span class="c-name">Name</span><span>Lat</span><span>Lon</span><span>km</span>
+            </div>
+            <div class="tbody">
+                <Virtualize Items="_points" ItemSize="30" Context="p">
+                    <div class="trow @RowClass(p)" @onclick="() => Select(p)">
+                        <span class="c-name" title="@p.Label">@p.Label</span>
+                        <span>@p.Lat.ToString("0.0000")</span>
+                        <span>@p.Lon.ToString("0.0000")</span>
+                        <span>@Km(p)</span>
+                    </div>
+                </Virtualize>
+            </div>
+        </aside>
+    </div>
+</div>
+
+@code {
+    private const double Aspect = 0.65; // Höhe/Breite der Karte (viewBox 1000 x 650)
+
+    private List<string> _dbs = new();
+    private List<string> _cols = new();
+    private string? _db, _col;
+    private bool _busy, _error;
+    private string _status = "Verbinde mit MongoDB …";
+
+    private List<GeoPoint> _points = new();
+    private double _radiusKm = 20;
+    private GeoPoint? _sel;
+    private readonly HashSet<string> _near = new();
+    private readonly Dictionary<string, double> _dist = new();
+
+    // Sichtfenster: Mittelpunkt (Kartenkoordinaten) und Breite in Grad-Einheiten
+    private double _cx, _cy, _w = 60;
+
+    private double Scale => 1000 / _w;
+    private string Transform => $"translate(500 325) scale({F(Scale)}) translate({F(-_cx)} {F(-_cy)})";
+    private static string F(double v) => v.ToString("0.##########", CultureInfo.InvariantCulture);
+
+    // ---------- Laden ----------
+
+    protected override async Task OnInitializedAsync()
+    {
+        _cx = 14.5; _cy = MapMath.Y(47.5);
+        try
+        {
+            _dbs = await Geo.GetDatabasesAsync();
+            _db = _dbs.FirstOrDefault();
+            if (_db == null) { _status = "Keine Datenbanken gefunden"; return; }
+            await LoadCollectionsAsync();
+            await LoadAsync();
+        }
+        catch (Exception ex) { SetError("MongoDB: " + ex.Message); }
+    }
+
+    private async Task LoadCollectionsAsync()
+    {
+        _cols = await Geo.GetCollectionsAsync(_db!);
+        _col = _cols.FirstOrDefault();
+    }
+
+    private async Task OnDbChangedAsync()
+    {
+        try
+        {
+            await LoadCollectionsAsync();
+            await LoadAsync();
+        }
+        catch (Exception ex) { SetError(ex.Message); }
+    }
+
+    private async Task LoadAsync()
+    {
+        if (_db == null || _col == null) return;
+        _busy = true; _error = false; _status = "Lade …";
+        try
+        {
+            var res = await Geo.LoadAsync(_db, _col);
+            _points = res.Points;
+            _sel = null;
+            Recalc();
+            FitAll();
+            _status = $"{_points.Count} Standorte" + (res.Skipped > 0 ? $" ({res.Skipped} ohne Koordinaten)" : "");
+        }
+        catch (Exception ex) { SetError(ex.Message); }
+        finally { _busy = false; }
+    }
+
+    private void SetError(string msg) { _error = true; _status = msg; }
+
+    // ---------- Auswahl und Umkreis ----------
+
+    private void Select(GeoPoint p)
+    {
+        _sel = p;
+        Recalc();
+        CenterOnSelection();
+    }
+
+    private void ClearSelection()
+    {
+        _sel = null;
+        Recalc();
+    }
+
+    private void OnRadiusChanged()
+    {
+        if (!(_radiusKm > 0)) _radiusKm = 20;
+        Recalc();
+        if (_sel != null) CenterOnSelection();
+    }
+
+    private void Recalc()
+    {
+        _near.Clear();
+        _dist.Clear();
+        if (_sel == null) return;
+
+        foreach (var p in _points)
+        {
+            var km = MapMath.HaversineMeters(_sel.Lat, _sel.Lon, p.Lat, p.Lon) / 1000;
+            _dist[p.Id] = km;
+            if (p.Id != _sel.Id && km <= _radiusKm) _near.Add(p.Id);
+        }
+    }
+
+    private string Km(GeoPoint p) => _sel != null && _dist.TryGetValue(p.Id, out var d) ? d.ToString("0.0") : "";
+
+    private string RowClass(GeoPoint p) =>
+        _sel?.Id == p.Id ? "sel" : _near.Contains(p.Id) ? "near" : "";
+
+    // ---------- Sichtfenster (Zoom / Verschieben) ----------
+
+    private void CenterOnSelection()
+    {
+        if (_sel == null) return;
+        _cx = _sel.X;
+        _cy = _sel.Y;
+        var radiusUnits = MapMath.KmToUnits(_radiusKm, _sel.Lat);
+        _w = Math.Clamp(radiusUnits * 3.6, 0.005, 400); // Umkreis füllt etwa die Karte
+    }
+
+    private void FitAll()
+    {
+        if (_points.Count == 0) { _cx = 14.5; _cy = MapMath.Y(47.5); _w = 60; return; }
+
+        double minX = double.MaxValue, maxX = double.MinValue, minY = double.MaxValue, maxY = double.MinValue;
+        foreach (var p in _points)
+        {
+            if (p.X < minX) minX = p.X;
+            if (p.X > maxX) maxX = p.X;
+            if (p.Y < minY) minY = p.Y;
+            if (p.Y > maxY) maxY = p.Y;
+        }
+        _cx = (minX + maxX) / 2;
+        _cy = (minY + maxY) / 2;
+        _w = Math.Clamp(Math.Max(maxX - minX, (maxY - minY) / Aspect) * 1.15, 0.2, 400);
+    }
+
+    private void ZoomIn() => _w = Math.Max(0.005, _w / 1.4);
+    private void ZoomOut() => _w = Math.Min(400, _w * 1.4);
+
+    private void OnWheel(WheelEventArgs e)
+    {
+        if (e.DeltaY < 0) ZoomIn();
+        else if (e.DeltaY > 0) ZoomOut();
+    }
+
+    private void Pan(int dx, int dy)
+    {
+        _cx += dx * _w * 0.25;
+        _cy += dy * _w * Aspect * 0.25;
+    }
+}

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>GeoMap Offline</title>
+    <link rel="stylesheet" href="app.css" />
+    <HeadOutlet @rendermode="NoPrerender" />
+</head>
+<body>
+    <Routes @rendermode="NoPrerender" />
+    <script src="_framework/blazor.web.js"></script>
+</body>
+</html>
+
+@code {
+    private static readonly IComponentRenderMode NoPrerender = new InteractiveServerRenderMode(prerender: false);
+}

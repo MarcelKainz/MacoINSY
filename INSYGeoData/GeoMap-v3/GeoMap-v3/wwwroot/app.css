@@ -1,0 +1,62 @@
+html, body { height: 100%; margin: 0; font-family: system-ui, "Segoe UI", sans-serif; font-size: 14px; color: #111827; }
+.layout { display: flex; flex-direction: column; height: 100vh; }
+
+/* ---------- Kopfleiste ---------- */
+.toolbar { display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; padding: .5rem .8rem; background: #1f2937; color: #fff; }
+.toolbar select, .toolbar button { padding: .3rem .5rem; border-radius: 4px; border: 0; }
+.toolbar button { background: #374151; color: #fff; cursor: pointer; }
+.toolbar button:disabled { opacity: .5; cursor: default; }
+.toolbar .status { margin-left: auto; font-size: .9rem; opacity: .9; }
+.toolbar .error { color: #fca5a5; }
+
+.main { flex: 1; display: flex; min-height: 0; }
+
+/* ---------- Karte ---------- */
+.mapwrap {
+    flex: 1; min-width: 0; min-height: 0; position: relative;
+    background: #a8c8e8;
+    container-type: size;
+    display: flex; align-items: center; justify-content: center;
+}
+/* Kartenfläche behält immer das Seitenverhältnis 1000:650 und passt in den freien Platz */
+.mapbox { width: min(100cqw, calc(100cqh * 1000 / 650)); aspect-ratio: 1000 / 650; }
+.map { width: 100%; height: 100%; display: block; background: #a8c8e8; user-select: none; }
+
+.land { fill: #f3f4f6; fill-rule: evenodd; stroke: #6b7280; stroke-width: 1px; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+
+.pt { fill: #ef4444; stroke: #fff; stroke-width: 1.5px; vector-effect: non-scaling-stroke; cursor: pointer; }
+.pt:hover { stroke: #111827; }
+.pt.near { fill: #22c55e; }
+.pt.sel { fill: #2563eb; stroke: #fff; stroke-width: 2px; pointer-events: none; }
+.radius { fill: rgba(37, 99, 235, .12); stroke: #2563eb; stroke-width: 2px; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; pointer-events: none; }
+
+.controls { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.controls button {
+    width: 30px; height: 30px; padding: 0; border: 1px solid #9ca3af; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 15px; line-height: 1;
+}
+.controls button:hover { background: #eff6ff; }
+.controls .zoom { display: flex; flex-direction: column; gap: 2px; }
+.controls .pad { display: grid; grid-template-columns: repeat(3, 30px); gap: 2px; }
+.controls .pad button { font-size: 11px; }
+
+/* ---------- Seitenleiste mit Tabelle ---------- */
+.nav { width: 380px; display: flex; flex-direction: column; background: #f9fafb; border-left: 1px solid #d1d5db; box-sizing: border-box; min-height: 0; }
+.nav-head { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .7rem .8rem; background: #1f2937; color: #fff; }
+.nav-head h2 { margin: 0; font-size: 1.05rem; }
+.nav-head h2 small { font-weight: normal; opacity: .7; margin-left: .3rem; }
+.nav-head input { width: 4.5rem; padding: .25rem .35rem; border: 0; border-radius: 4px; }
+
+.sel-info { display: flex; flex-direction: column; gap: .15rem; padding: .6rem .8rem; border-bottom: 1px solid #e5e7eb; background: #fff; font-size: .9rem; }
+.sel-info .muted { color: #6b7280; }
+.sel-info button { align-self: flex-start; margin-top: .3rem; padding: .25rem .6rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; }
+
+.thead, .trow { display: grid; grid-template-columns: 1fr 76px 76px 56px; gap: .4rem; align-items: center; padding: 0 .8rem; box-sizing: border-box; }
+.thead { height: 30px; font-size: .8rem; font-weight: 600; color: #4b5563; background: #f3f4f6; border-bottom: 1px solid #e5e7eb; }
+.tbody { flex: 1; min-height: 0; overflow-y: auto; }
+.trow { height: 30px; font-size: .85rem; border-bottom: 1px solid #f3f4f6; cursor: pointer; }
+.trow:hover { background: #eff6ff; }
+.trow.near { background: #dcfce7; }
+.trow.sel { background: #dbeafe; font-weight: 600; }
+.c-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thead span:not(.c-name), .trow span:not(.c-name) { text-align: right; font-variant-numeric: tabular-nums; }

@@ -1,0 +1,418 @@
+@page "/"
+@implements IAsyncDisposable
+@inject GeoService Geo
+@inject IJSRuntime JS
+
+<PageTitle>GeoMap Offline</PageTitle>
+
+<div class="layout">
+    <div class="toolbar">
+        <label>DB
+            <select @bind="_db" @bind:after="OnDbChanged">
+                @foreach (var d in _dbs) { <option value="@d">@d</option> }
+            </select>
+        </label>
+        <label>Collection
+            <select @bind="_col">
+                @foreach (var c in _cols) { <option value="@c">@c</option> }
+            </select>
+        </label>
+        <label>Limit <input type="number" min="1" max="100000" @bind="_limit" style="width:6rem" /></label>
+        <label><input type="checkbox" @bind="_swap" /> Lat/Lon tauschen</label>
+        <button @onclick="LoadAsync" disabled="@(_busy || string.IsNullOrEmpty(_col))">Laden</button>
+
+        <span class="sep"></span>
+
+        <button class="@Cls(Mode.Pin)" @onclick="() => SetModeAsync(Mode.Pin)">📍 Pin &amp; Radius</button>
+        <button class="@Cls(Mode.Add)" @onclick="() => SetModeAsync(Mode.Add)">➕ Standort anlegen</button>
+        <button class="@Cls(Mode.Edit)" @onclick="() => SetModeAsync(Mode.Edit)">✋ Punkte verschieben</button>
+        <label title="Aus: Änderungen gelten nur bis zum nächsten Laden, die Datenbank bleibt unberührt">
+            <input type="checkbox" @bind="_persist" /> In DB speichern
+        </label>
+
+        <span class="status @(_error ? "error" : "")">@_status</span>
+    </div>
+
+    <div class="main">
+        <div id="map"></div>
+
+        <aside class="panel">
+            <h3>Suchkreis</h3>
+            <div class="grid">
+                <label>Breite (Lat)
+                    <input type="number" step="any" @bind="_pinLat" @bind:after="ApplyPinAsync" />
+                </label>
+                <label>Länge (Lon)
+                    <input type="number" step="any" @bind="_pinLon" @bind:after="ApplyPinAsync" />
+                </label>
+            </div>
+            <label>Radius (km)
+                <input type="number" min="0.01" step="any" @bind="_radiusKm" @bind:after="ApplyPinAsync" />
+            </label>
+            <input type="range" min="0.1" max="200" step="0.1" style="width:100%"
+                   @bind="_radiusKm" @bind:event="oninput" @bind:after="ApplyPinAsync" />
+            <div class="row">
+                <button @onclick="ZoomCircleAsync" disabled="@(!_hasPin)">Kreis anzeigen</button>
+                <button @onclick="ClearPinAsync" disabled="@(!_hasPin)">Pin entfernen</button>
+                <button @onclick="AddAtPinAsync" disabled="@(!_hasPin)">Standort am Pin anlegen</button>
+            </div>
+            <p class="hint">@Hint</p>
+
+            @if (_hasPin)
+            {
+                <h3>Im Radius: @_insideList.Count</h3>
+                <ul class="list">
+                    @foreach (var (p, dist) in _insideList.Take(200))
+                    {
+                        <li class="@(_sel?.Id == p.Id ? "sel" : "")" @onclick="() => SelectAsync(p, true)">
+                            <span>@p.Label</span><small>@FormatDist(dist)</small>
+                        </li>
+                    }
+                </ul>
+                @if (_insideList.Count > 200) { <p class="hint">Es werden die 200 nächsten angezeigt.</p> }
+            }
+
+            @if (_sel != null)
+            {
+                <h3>Standort bearbeiten</h3>
+                <label>Name
+                    <input @bind="_editLabel" />
+                </label>
+                <div class="grid">
+                    <label>Breite (Lat)
+                        <input type="number" step="any" @bind="_editLat" />
+                    </label>
+                    <label>Länge (Lon)
+                        <input type="number" step="any" @bind="_editLon" />
+                    </label>
+                </div>
+                <div class="row">
+                    <button @onclick="SaveSelectedAsync">Speichern</button>
+                    <button class="@(_placing ? "on" : "")" @onclick="TogglePlaceAsync">Auf Karte setzen</button>
+                    <button class="danger" @onclick="DeleteSelectedAsync">Löschen</button>
+                    <button @onclick="DeselectAsync">Abwählen</button>
+                </div>
+                @if (_placing) { <p class="hint">Jetzt an die gewünschte Stelle auf der Karte klicken.</p> }
+                <pre>@_sel.Details</pre>
+            }
+        </aside>
+    </div>
+</div>
+
+@code {
+    private enum Mode { Pin, Add, Edit }
+
+    private List<string> _dbs = new();
+    private List<string> _cols = new();
+    private string? _db, _col;
+    private int _limit = 5000;
+    private bool _swap, _busy, _error, _persist = true;
+    private string _status = "Verbinde mit MongoDB …";
+
+    // Stand der zuletzt geladenen Daten (Schreibzugriffe gehen immer dorthin)
+    private string? _loadedDb, _loadedCol;
+    private bool _swapLoaded;
+    private List<GeoPoint> _points = new();
+
+    private Mode _mode = Mode.Pin;
+    private bool _placing;
+
+    private bool _hasPin;
+    private double _pinLat = 47.5, _pinLon = 14.5, _radiusKm = 5;
+    private List<(GeoPoint P, double D)> _insideList = new();
+
+    private GeoPoint? _sel;
+    private string _editLabel = "";
+    private double _editLat, _editLon;
+
+    private DotNetObjectReference<Map>? _ref;
+
+    private string Cls(Mode m) => _mode == m ? "on" : "";
+
+    private string Hint => _mode switch
+    {
+        Mode.Pin => "Karte anklicken setzt den Pin. Pin ziehen verschiebt ihn, das Quadrat am Kreisrand ziehen ändert den Radius.",
+        Mode.Add => "Karte anklicken legt dort einen neuen Standort an.",
+        _ => "Punkte mit der Maus verschieben, Änderungen werden sofort gespeichert."
+    };
+
+    // ---------- Start / Laden ----------
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _ref = DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("geoMap.init", "map", _ref);
+        await JS.InvokeVoidAsync("geoMap.setMode", "pin");
+        await UpdateCursorAsync();
+        try
+        {
+            _dbs = await Geo.GetDatabasesAsync();
+            _db = _dbs.FirstOrDefault();
+            if (_db != null) await OnDbChanged();
+            _status = _dbs.Count == 0 ? "Keine Datenbanken gefunden" : "Bereit";
+        }
+        catch (Exception ex) { SetError("MongoDB: " + ex.Message); }
+        StateHasChanged();
+    }
+
+    private async Task OnDbChanged()
+    {
+        if (_db == null) return;
+        try
+        {
+            _cols = await Geo.GetCollectionsAsync(_db);
+            _col = _cols.FirstOrDefault();
+        }
+        catch (Exception ex) { SetError(ex.Message); }
+    }
+
+    private async Task LoadAsync()
+    {
+        if (_db == null || _col == null) return;
+        _busy = true; _error = false; _status = "Lade …";
+        try
+        {
+            var r = await Geo.LoadAsync(_db, _col, _limit, _swap);
+            _points = r.Points;
+            _loadedDb = _db; _loadedCol = _col; _swapLoaded = _swap;
+            _sel = null; _placing = false;
+            await JS.InvokeVoidAsync("geoMap.setPoints", _points, true);
+            await RecalcAsync();
+            await UpdateCursorAsync();
+            _status = $"{r.Points.Count} Punkte angezeigt" + (r.Skipped > 0 ? $" ({r.Skipped} ohne gültige Koordinaten)" : "");
+        }
+        catch (Exception ex) { SetError(ex.Message); }
+        finally { _busy = false; }
+    }
+
+    // ---------- Modus ----------
+
+    private async Task SetModeAsync(Mode m)
+    {
+        _mode = m;
+        _placing = false;
+        await JS.InvokeVoidAsync("geoMap.setMode", m switch { Mode.Pin => "pin", Mode.Add => "add", _ => "edit" });
+        await UpdateCursorAsync();
+    }
+
+    private Task UpdateCursorAsync() =>
+        JS.InvokeVoidAsync("geoMap.setCursor", _placing || _mode != Mode.Edit).AsTask();
+
+    // ---------- Pin / Radius ----------
+
+    private async Task ApplyPinAsync()
+    {
+        if (_radiusKm < 0.01) _radiusKm = 0.01;
+        _hasPin = true;
+        await JS.InvokeVoidAsync("geoMap.setPin", _pinLat, _pinLon, _radiusKm * 1000, false);
+        await RecalcAsync();
+    }
+
+    private async Task ZoomCircleAsync() =>
+        await JS.InvokeVoidAsync("geoMap.setPin", _pinLat, _pinLon, _radiusKm * 1000, true);
+
+    private async Task ClearPinAsync()
+    {
+        _hasPin = false;
+        await JS.InvokeVoidAsync("geoMap.clearPin");
+        await RecalcAsync();
+    }
+
+    private async Task RecalcAsync()
+    {
+        if (_hasPin)
+        {
+            var r = _radiusKm * 1000;
+            _insideList = _points
+                .Select(p => (P: p, D: HaversineMeters(_pinLat, _pinLon, p.Lat, p.Lon)))
+                .Where(x => x.D <= r)
+                .OrderBy(x => x.D)
+                .ToList();
+        }
+        else _insideList = new();
+
+        await JS.InvokeVoidAsync("geoMap.setInside", _insideList.Select(x => x.P.Id).ToList());
+    }
+
+    private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double R = 6371008.8;
+        double ToRad(double d) => d * Math.PI / 180;
+        var dLat = ToRad(lat2 - lat1);
+        var dLon = ToRad(lon2 - lon1);
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(ToRad(lat1)) * Math.Cos(ToRad(lat2)) * Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        return 2 * R * Math.Asin(Math.Min(1, Math.Sqrt(a)));
+    }
+
+    private static string FormatDist(double m) => m < 1000 ? $"{m:0} m" : $"{m / 1000:0.##} km";
+
+    // ---------- Callbacks aus JavaScript ----------
+
+    [JSInvokable]
+    public async Task OnMapClick(double lat, double lon)
+    {
+        try
+        {
+            if (_placing && _sel != null)
+            {
+                _placing = false;
+                await UpdateCursorAsync();
+                await ApplyChangeAsync(_sel, _sel.Label, lat, lon);
+            }
+            else if (_mode == Mode.Pin)
+            {
+                _pinLat = lat; _pinLon = lon;
+                await ApplyPinAsync();
+            }
+            else if (_mode == Mode.Add)
+            {
+                await AddAsync(lat, lon);
+            }
+        }
+        catch (Exception ex) { SetError(ex.Message); }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnPinChanged(double lat, double lon, double radiusM)
+    {
+        _hasPin = true;
+        _pinLat = Math.Round(lat, 6);
+        _pinLon = Math.Round(lon, 6);
+        _radiusKm = Math.Round(radiusM / 1000, 3);
+        await RecalcAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnPointSelected(string id)
+    {
+        var p = _points.FirstOrDefault(x => x.Id == id);
+        if (p != null) await SelectAsync(p, false);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task OnPointDragged(string id, double lat, double lon)
+    {
+        var p = _points.FirstOrDefault(x => x.Id == id);
+        if (p != null) await ApplyChangeAsync(p, p.Label, Math.Round(lat, 6), Math.Round(lon, 6));
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // ---------- Standorte bearbeiten ----------
+
+    private async Task SelectAsync(GeoPoint p, bool pan)
+    {
+        _sel = p;
+        _editLabel = p.Label; _editLat = p.Lat; _editLon = p.Lon;
+        await JS.InvokeVoidAsync("geoMap.selectPoint", p.Id, pan);
+    }
+
+    private async Task DeselectAsync()
+    {
+        _sel = null; _placing = false;
+        await JS.InvokeVoidAsync("geoMap.selectPoint", null, false);
+        await UpdateCursorAsync();
+    }
+
+    private async Task TogglePlaceAsync()
+    {
+        _placing = !_placing;
+        await UpdateCursorAsync();
+    }
+
+    private async Task SaveSelectedAsync()
+    {
+        if (_sel == null) return;
+        await ApplyChangeAsync(_sel, _editLabel, _editLat, _editLon);
+    }
+
+    // Speichert (optional in der DB), aktualisiert Liste, Karte und Radius-Auswertung
+    private async Task ApplyChangeAsync(GeoPoint p, string label, double lat, double lon)
+    {
+        if (lat is < -90 or > 90 || lon is < -180 or > 180)
+        {
+            SetError("Ungültige Koordinaten (Lat -90..90, Lon -180..180)");
+            await JS.InvokeVoidAsync("geoMap.updatePoint", p);
+            return;
+        }
+        try
+        {
+            if (_persist && p.IdType != "Local" && _loadedDb != null && _loadedCol != null)
+                await Geo.UpdateAsync(_loadedDb, _loadedCol, p.Id, p.IdType, label, lat, lon, _swapLoaded);
+
+            var n = p with { Label = label, Lat = lat, Lon = lon };
+            var i = _points.FindIndex(x => x.Id == p.Id);
+            if (i >= 0) _points[i] = n;
+            if (_sel?.Id == p.Id)
+            {
+                _sel = n; _editLabel = label; _editLat = lat; _editLon = lon;
+            }
+            await JS.InvokeVoidAsync("geoMap.updatePoint", n);
+            await RecalcAsync();
+            _error = false;
+            _status = $"{label}: {lat:0.00000}, {lon:0.00000}" + (_persist ? " gespeichert" : " (nur lokal)");
+        }
+        catch (Exception ex)
+        {
+            SetError("Speichern fehlgeschlagen: " + ex.Message);
+            await JS.InvokeVoidAsync("geoMap.updatePoint", p);
+        }
+    }
+
+    private async Task AddAsync(double lat, double lon)
+    {
+        if (_loadedDb == null || _loadedCol == null)
+        {
+            SetError("Erst eine Collection laden");
+            return;
+        }
+        GeoPoint p;
+        if (_persist) p = await Geo.InsertAsync(_loadedDb, _loadedCol, "Neuer Standort", lat, lon, _swapLoaded);
+        else p = new GeoPoint(Guid.NewGuid().ToString(), "Local", "Neuer Standort", lat, lon, "");
+
+        _points.Add(p);
+        await JS.InvokeVoidAsync("geoMap.addPoint", p);
+        await RecalcAsync();
+        await SelectAsync(p, false);
+        _error = false;
+        _status = "Standort angelegt, Name rechts ändern";
+    }
+
+    private async Task AddAtPinAsync()
+    {
+        try { await AddAsync(_pinLat, _pinLon); }
+        catch (Exception ex) { SetError(ex.Message); }
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        if (_sel == null) return;
+        if (!await JS.InvokeAsync<bool>("confirm", $"Standort „{_sel.Label}“ wirklich löschen?")) return;
+        try
+        {
+            if (_persist && _sel.IdType != "Local" && _loadedDb != null && _loadedCol != null)
+                await Geo.DeleteAsync(_loadedDb, _loadedCol, _sel.Id, _sel.IdType);
+
+            var id = _sel.Id;
+            _points.RemoveAll(x => x.Id == id);
+            _sel = null; _placing = false;
+            await JS.InvokeVoidAsync("geoMap.removePoint", id);
+            await RecalcAsync();
+            await UpdateCursorAsync();
+            _error = false; _status = "Standort gelöscht";
+        }
+        catch (Exception ex) { SetError("Löschen fehlgeschlagen: " + ex.Message); }
+    }
+
+    private void SetError(string msg) { _error = true; _status = msg; }
+
+    public ValueTask DisposeAsync()
+    {
+        _ref?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}
